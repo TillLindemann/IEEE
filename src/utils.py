@@ -125,3 +125,94 @@ def train_model_classification(train,
         y_pred_valid = model.predict(X_valid)
     auc = fast_auc(y_valid,y_pred_valid)
     return y_pred, auc
+
+
+import logging
+from typing import Optional
+
+import numpy as np
+from sklearn.model_selection._split import _BaseKFold
+from sklearn.utils import indexable
+from sklearn.utils.validation import _num_samples
+
+LOGGER = logging.getLogger(__name__)
+
+
+class TimeSeriesSplit(_BaseKFold):
+    def __init__(self,
+                 n_splits: Optional[int] = 5,
+                 train_size: Optional[int] = None,
+                 test_size: Optional[int] = None,
+                 delay: int = 0,
+                 force_step_size: Optional[int] = None):
+
+        if n_splits and n_splits < 5:
+            raise ValueError(f'Cannot have n_splits less than 5 (n_splits={n_splits})')
+        super().__init__(n_splits, shuffle=False, random_state=None)
+
+        self.train_size = train_size
+
+        if test_size and test_size < 0:
+            raise ValueError(f'Cannot have negative values of test_size (test_size={test_size})')
+        self.test_size = test_size
+
+        if delay < 0:
+            raise ValueError(f'Cannot have negative values of delay (delay={delay})')
+        self.delay = delay
+
+        if force_step_size and force_step_size < 1:
+            raise ValueError(f'Cannot have zero or negative values of force_step_size '
+                             f'(force_step_size={force_step_size}).')
+
+        self.force_step_size = force_step_size
+
+    def split(self, X, y=None, groups=None):
+        X, y, groups = indexable(X, y, groups)  # pylint: disable=unbalanced-tuple-unpacking
+        n_samples = _num_samples(X)
+        n_splits = self.n_splits
+        n_folds = n_splits + 1
+        delay = self.delay
+
+        if n_folds > n_samples:
+            raise ValueError(f'Cannot have number of folds={n_folds} greater than the number of samples: {n_samples}.')
+
+        indices = np.arange(n_samples)
+        split_size = n_samples // n_folds
+
+        train_size = self.train_size or split_size * self.n_splits
+        test_size = self.test_size or n_samples // n_folds
+        full_test = test_size + delay
+
+        if full_test + n_splits > n_samples:
+            raise ValueError(f'test_size\\({test_size}\\) + delay\\({delay}\\) = {test_size + delay} + '
+                             f'n_splits={n_splits} \n'
+                             f' greater than the number of samples: {n_samples}. Cannot create fold logic.')
+
+        # Generate logic for splits.
+        # Overwrite fold test_starts ranges if force_step_size is specified.
+        if self.force_step_size:
+            step_size = self.force_step_size
+            final_fold_start = n_samples - (train_size + full_test)
+            range_start = (final_fold_start % step_size) + train_size
+
+            test_starts = range(range_start, n_samples, step_size)
+
+        else:
+            if not self.train_size:
+                step_size = split_size
+                range_start = (split_size - full_test) + split_size + (n_samples % n_folds)
+            else:
+                step_size = (n_samples - (train_size + full_test)) // n_folds
+                final_fold_start = n_samples - (train_size + full_test)
+                range_start = (final_fold_start - (step_size * (n_splits - 1))) + train_size
+
+            test_starts = range(range_start, n_samples, step_size)
+
+        # Generate data splits.
+        for test_start in test_starts:
+            idx_start = test_start - train_size if self.train_size is not None else 0
+            # Ensure we always return a test set of the same size
+            if indices[test_start:test_start + full_test].size < full_test:
+                continue
+            yield (indices[idx_start:test_start],
+                   indices[test_start + delay:test_start + full_test])
